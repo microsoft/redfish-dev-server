@@ -18,8 +18,23 @@ RAS_DEMO_DIR = ROOT / "examples" / "ras_api_demo"
 for path in (ROOT, CONTOSO_DIR, SHIM_DIR, RAS_DEMO_DIR):
     sys.path.insert(0, str(path))
 
+_STUBBED_SAMSUNG_DFA = False
+try:
+    import samsung_dfa  # noqa: F401,E402
+except ImportError:
+    # samsung_dfa.py is distributed separately; stub it so the public
+    # adapter tests still run without it.
+    import types
+    _STUBBED_SAMSUNG_DFA = True
+    sys.modules["samsung_dfa"] = types.ModuleType("samsung_dfa")
+    sys.modules["samsung_dfa"].analyze = lambda records: {
+        "fault": None, "cpads": [], "advisories": []}
+
 import analyzer_samsung as samsung  # noqa: E402
+if _STUBBED_SAMSUNG_DFA:
+    sys.modules.pop("samsung_dfa", None)
 import contoso_action_parameters as actions  # noqa: E402
+from ras_api_samsung_demo import RASAPISamsungDemo  # noqa: E402
 
 HELPERS_SPEC = importlib.util.spec_from_file_location(
     "samsung_test_helpers", ROOT / "tests" / "test_contoso_memory_shims.py")
@@ -31,6 +46,49 @@ HELPERS_SPEC.loader.exec_module(helpers)
 def _samsung_event():
     return helpers.decode_memory_events(
         helpers._records(helpers._memory_cper(helpers.SAMSUNG)))[0]
+
+
+def test_samsung_demo_fails_fast_when_dfa_is_missing():
+    with tempfile.TemporaryDirectory() as directory:
+        demo = RASAPISamsungDemo.__new__(RASAPISamsungDemo)
+        demo.script_dir = Path(directory)
+        try:
+            demo._require_samsung_dfa()
+        except RuntimeError as exc:
+            assert "Samsung DFA is not installed" in str(exc)
+        else:
+            raise AssertionError("Samsung demo accepted a missing DFA")
+
+
+def test_samsung_demo_accepts_callable_dfa():
+    with tempfile.TemporaryDirectory() as directory:
+        demo = RASAPISamsungDemo.__new__(RASAPISamsungDemo)
+        demo.script_dir = Path(directory)
+        shim_dir = (
+            demo.script_dir / "analyzers" / "contoso" / "memory_shims")
+        shim_dir.mkdir(parents=True)
+        (shim_dir / "samsung_dfa.py").write_text(
+            "def analyze(records):\n    return records\n")
+
+        demo._require_samsung_dfa()
+
+
+def test_synthetic_dfa_stub_is_not_globally_registered():
+    if _STUBBED_SAMSUNG_DFA:
+        assert "samsung_dfa" not in sys.modules
+
+
+def test_samsung_demo_reports_failed_submission():
+    demo = RASAPISamsungDemo.__new__(RASAPISamsungDemo)
+    demo.server_online = True
+    demo._build_dram_row_error_cpad = lambda *_args: Path("error.cpad")
+    demo._submit_binary_cpad = lambda *_args, **_kwargs: False
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        submitted = demo.inject_dram_row_error(
+            row=1, column=2, beat="0:0:0", occurrence_label="test")
+
+    assert submitted is False
 
 
 def _ppr_parameters(event):
@@ -263,6 +321,25 @@ def test_samsung_entry_point_adapts_records_and_returns_requests():
     }]}]
 
 
+def test_samsung_entry_point_prints_string_advisories():
+    event = _samsung_event()
+    original_analyze = samsung.analyze
+    samsung.analyze = lambda _records: {
+        "fault": None,
+        "cpads": [],
+        "advisories": ["Related failures detected on DIMM B1"],
+    }
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            requests = samsung.analyze_memory_events([event])
+    finally:
+        samsung.analyze = original_analyze
+
+    assert requests == []
+    assert "Related failures detected on DIMM B1" in output.getvalue()
+
+
 def test_samsung_rejects_non_boolean_action_urgency():
     event = _samsung_event()
     result = {
@@ -289,15 +366,28 @@ def test_samsung_rejects_non_boolean_action_urgency():
         raise AssertionError("integer Samsung urgency was accepted")
 
 
-def test_samsung_analyzer_owns_spare_row_budget():
-    record = {
+def test_samsung_analyze_delegates_to_dfa_engine():
+    """samsung.analyze() delegates entirely to samsung_dfa.analyze()."""
+    records = [{
         "record_type": "memory_error",
         "ppr": {"target_bank_repair_count": 2},
-    }
+    }]
+    captured = {}
+    fake_result = {"fault": None, "cpads": [], "advisories": []}
+    original_analyze = samsung.samsung_dfa.analyze
 
-    samsung.analyze([record])
+    def fake_analyze(passed_records):
+        captured["records"] = passed_records
+        return fake_result
 
-    assert record["ppr"]["repairs_per_bank"] == 14
+    samsung.samsung_dfa.analyze = fake_analyze
+    try:
+        result = samsung.analyze(records)
+    finally:
+        samsung.samsung_dfa.analyze = original_analyze
+
+    assert captured["records"] is records
+    assert result is fake_result
 
 
 def test_replace_request_builds_cpad_with_source_fru_text():

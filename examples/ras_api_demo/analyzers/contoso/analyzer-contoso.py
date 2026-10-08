@@ -86,7 +86,7 @@ from memory_events import (       # noqa: E402
     events_for_manufacturer,
     newest_manufacturer_ids,
 )
-from memory_shims import ShimContractError  # noqa: E402
+from memory_shims import ShimContractError, discover_memory_shims  # noqa: E402
 from memory_address_translation import (  # noqa: E402
     MemoryAddressConfiguration,
     MemoryOrganization,
@@ -134,6 +134,23 @@ def _indented_print(indent: str):
         for line in str(text).split("\n"):
             builtins.print(f"{indent}{line}" if line != "" else "", **kwargs)
     return _p
+
+
+def _boxed_lines(text: str, indent: str = "", width: int = 69):
+    """Return a consistently sized three-line text box."""
+    content = f"  {text}"
+    if len(content) > width:
+        raise ValueError(f"box content exceeds width {width}: {text}")
+    return (
+        f"{indent}┌{'─' * width}┐",
+        f"{indent}│{content:<{width}}│",
+        f"{indent}└{'─' * width}┘",
+    )
+
+
+def _aligned_field(prefix: str, label: str, value: Any, width: int) -> str:
+    """Format one report field with a fixed value column."""
+    return f"{prefix}{label + ':':<{width}}{value}"
 
 
 def decode_newest_sections(analyzer: "ContosoAnalyzer",
@@ -676,14 +693,20 @@ class ContosoAnalyzer:
         return outputs, errors
 
     def default_memory_events(self, shim_result):
-        """Return newest DRAM errors not successfully owned by a shim."""
+        """Return newest DRAM errors whose manufacturer has no loaded vendor shim.
+
+        A manufacturer with a registered shim owns its errors even when that
+        shim fails: the failure is reported, but the default Contoso analysis
+        never substitutes its own recommendation for the vendor's.
+        """
+        owned = (shim_result['handled_manufacturers']
+                 | shim_result.get('failed_manufacturers', set()))
         return [
             event for event in shim_result['events']
             if event['event_type'] == 'memory_error'
             and event['source']['is_newest']
             and self._memory_location_from_event(event) is not None
-            and tuple(event['dram_manufacturer_id']) not in
-            shim_result['handled_manufacturers']
+            and tuple(event['dram_manufacturer_id']) not in owned
         ]
 
     # ─── CPER Data Extraction ───────────────────────────────────────────
@@ -1089,7 +1112,7 @@ class ContosoAnalyzer:
                 platform_id = platform_id_data.get('guid', 'N/A')
             else:
                 platform_id = platform_id_data
-            print(f"   Platform ID:        {platform_id}")
+            print(_aligned_field("   ", "Platform ID", platform_id, 20))
 
             # Partition ID
             partition_id_data = header.get('partitionID', 'N/A')
@@ -1097,7 +1120,7 @@ class ContosoAnalyzer:
                 partition_id = partition_id_data.get('guid', 'N/A')
             else:
                 partition_id = partition_id_data
-            print(f"   Partition ID:       {partition_id}")
+            print(_aligned_field("   ", "Partition ID", partition_id, 20))
 
             # Creator ID
             creator_id_data = header.get('creatorID', 'N/A')
@@ -1105,15 +1128,15 @@ class ContosoAnalyzer:
                 creator_id = creator_id_data.get('guid', 'N/A')
             else:
                 creator_id = creator_id_data
-            print(f"   Creator ID:         {creator_id}")
+            print(_aligned_field("   ", "Creator ID", creator_id, 20))
 
             # Timestamp
             timestamp = header.get('timestamp', 'N/A')
-            print(f"   Timestamp:          {timestamp}")
+            print(_aligned_field("   ", "Timestamp", timestamp, 20))
 
             # Record ID
             record_id = header.get('recordID', 'N/A')
-            print(f"   Record ID:          {record_id}")
+            print(_aligned_field("   ", "Record ID", record_id, 20))
 
             # Severity
             severity_data = header.get('severity', {})
@@ -1126,7 +1149,8 @@ class ContosoAnalyzer:
             else:
                 severity_code = 'N/A'
                 severity_name = severity_data
-            print(f"   Severity:           {severity_name} ({severity_code})")
+            print(_aligned_field(
+                "   ", "Severity", f"{severity_name} ({severity_code})", 20))
 
             # Notification Type
             notif_data = header.get('notificationType', {})
@@ -1136,12 +1160,14 @@ class ContosoAnalyzer:
             else:
                 notif_type = notif_data
                 notif_guid = 'N/A'
-            print(f"   Notification Type:  {notif_type}")
+            print(_aligned_field(
+                "   ", "Notification Type", notif_type, 20))
 
             # Errors logged across the CPER's sections (by name).
             error_names = self._collect_section_error_names(cper_data)
             if error_names:
-                print(f"   Errors:             {', '.join(error_names)}")
+                print(_aligned_field(
+                    "   ", "Errors", ", ".join(error_names), 20))
 
             # Section information
             sections = cper_data.get('sectionDescriptors', [])
@@ -1167,10 +1193,13 @@ class ContosoAnalyzer:
                     display_type = contoso_section or section_name
 
                     print(f"      Section {idx}:")
-                    print(f"         Type:            {display_type}")
-                    print(f"         FRU ID:          {fru_id}")
+                    print(_aligned_field(
+                        "         ", "Type", display_type, 17))
+                    print(_aligned_field(
+                        "         ", "FRU ID", fru_id, 17))
                     if fru_text != 'N/A':
-                        print(f"         FRU Text:        {fru_text}")
+                        print(_aligned_field(
+                            "         ", "FRU Text", fru_text, 17))
 
                     # For PlatformActionEvent sections, show full action event details
                     is_action_event = isinstance(section_name, str) and 'action event' in section_name.lower()
@@ -1188,7 +1217,9 @@ class ContosoAnalyzer:
                                 '0x03': 'Not Supported',
                             }
                             return_desc = ACTION_RETURN_CODES.get(return_code, return_code)
-                            print(f"         Action Result:   {return_desc} ({return_code})")
+                            print(_aligned_field(
+                                "         ", "Action Result",
+                                f"{return_desc} ({return_code})", 17))
 
                             # Source Action ID
                             action_id = ae_data.get('cpadActionId', 'N/A')
@@ -1203,7 +1234,9 @@ class ContosoAnalyzer:
                                 '0x8003': 'Reboot with Memory Retraining',
                             }
                             action_desc = ACTION_ID_MAP.get(action_id, action_id)
-                            print(f"         Source Action:    {action_desc} ({action_id})")
+                            print(_aligned_field(
+                                "         ", "Source Action",
+                                f"{action_desc} ({action_id})", 17))
 
                     # Section severity
                     sec_severity = section.get('severity', {})
@@ -1211,7 +1244,8 @@ class ContosoAnalyzer:
                         sec_sev_name = sec_severity.get('name', 'N/A')
                         if sec_sev_name == 'Unknown' and sec_severity.get('code') == 4:
                             sec_sev_name = 'Action Event'
-                        print(f"         Severity:        {sec_sev_name}")
+                        print(_aligned_field(
+                            "         ", "Severity", sec_sev_name, 17))
 
                     # Contoso proprietary section: decode and print its body in
                     # the same structure as the Contoso CPER section format.
@@ -1913,6 +1947,23 @@ class ContosoAnalyzer:
 # Plugin protocol — discovery and orchestrator-driven run modes
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _memory_analyzer_descriptors() -> List[Dict[str, Any]]:
+    """Describe the memory-vendor shims this analyzer routes DRAM errors to."""
+    shims, _errors = discover_memory_shims(SCRIPT_DIR / "memory_shims")
+    unique = {id(shim): shim for shim in shims.values()}.values()
+    return [
+        {
+            "name": shim.name,
+            "version": shim.version,
+            "dram_manufacturer_ids": [
+                f"{vendor[0]:02X} {vendor[1]:02X}"
+                for vendor in shim.manufacturer_ids
+            ],
+        }
+        for shim in sorted(unique, key=lambda shim: shim.name)
+    ]
+
+
 def emit_discovery() -> int:
     """Print this analyzer's discovery descriptor as JSON and exit."""
     descriptor = {
@@ -1920,6 +1971,7 @@ def emit_discovery() -> int:
         "analyzer_version": ANALYZER_VERSION,
         "creator_ids": CREATOR_IDS,
         "prior_days": PRIOR_DAYS,
+        "memory_analyzers": _memory_analyzer_descriptors(),
     }
     print(json.dumps(descriptor))
     return 0
@@ -1958,9 +2010,13 @@ def run_analysis(input_file: str) -> int:
 
     IND = "      "  # 6-space margin: nest this plugin's output inside its box
 
-    print(f"\n{IND}┌─────────────────────────────────────────────────────────────────────┐")
-    print(f"{IND}│  Contoso CPER Analyzer (vendor plugin — runs as its own process)     │")
-    print(f"{IND}└─────────────────────────────────────────────────────────────────────┘")
+    banner = _boxed_lines(
+        "Contoso CPER Analyzer (vendor plugin — runs as its own process)",
+        IND,
+    )
+    print(f"\n{banner[0]}")
+    print(banner[1])
+    print(banner[2])
 
     # The engine writes its outputs (analysis JSON and binary CPADs)
     # into our own directory so the AO can collect them afterward.
@@ -2037,6 +2093,7 @@ def run_analysis(input_file: str) -> int:
     )
     shim_result = memory_result["shim_result"] if memory_result else {
         "events": [], "invocations": [], "handled_manufacturers": set(),
+        "failed_manufacturers": set(),
     }
     shim_cpad_paths = memory_result["shim_cpads"] if memory_result else []
     shim_cpad_filenames = [Path(path).name for path in shim_cpad_paths]
@@ -2048,7 +2105,19 @@ def run_analysis(input_file: str) -> int:
     dram_row_failure_detected = (
         memory_result["dram_row_failure_detected"] if memory_result else False)
 
-    if memory_result is not None:
+    if memory_result is not None and memory_result.get("action_only"):
+        for invocation in shim_result["invocations"]:
+            if invocation["status"] == "ok":
+                print(
+                    f"\n{IND}   📣 Platform Action Event delivered to "
+                    f"{invocation['shim']}")
+            else:
+                print(
+                    f"\n{IND}   ⚠️  Platform Action Event delivery to "
+                    f"{invocation['shim']} failed: {invocation['error']}")
+        for _vendor_id, error in memory_result["emission_errors"]:
+            print(f"{IND}   ⚠️  Vendor action-result CPAD emission failed: {error}")
+    elif memory_result is not None:
         analysis_route = memory_result["analysis_route"]
         print(f"\n{IND}   🧭 {analysis_route['heading']}")
         for message in analysis_route["messages"]:
@@ -2062,10 +2131,21 @@ def run_analysis(input_file: str) -> int:
                       f"{invocation['cpad_count']} CPAD(s)")
             else:
                 print(f"{IND}   ⚠️  {invocation['shim']} failed: "
-                      f"{invocation['error']} — using default analysis when applicable")
+                      f"{invocation['error']}")
         for _vendor_id, error in memory_result["emission_errors"]:
             print(f"{IND}   ⚠️  Memory shim CPAD emission failed: {error}")
 
+    # A DIMM whose manufacturer has a vendor shim is owned by that shim: the
+    # default Contoso row check and recommendation are not shown for it.
+    vendor_owned = bool(
+        memory_result is not None
+        and not memory_result["default_events"]
+        and (shim_result["handled_manufacturers"]
+             or shim_result["failed_manufacturers"]))
+
+    action_only = bool(
+        memory_result is not None and memory_result.get("action_only"))
+    if memory_result is not None and not action_only and not vendor_owned:
         print(f"\n{IND}   🔁 DRAM device-row failure check")
         if dram_row_failure_detected:
             print(f"{IND}      A prior CPER recorded a different column on this DRAM device row.")
@@ -2081,20 +2161,46 @@ def run_analysis(input_file: str) -> int:
     sppr_path = default_cpad_paths[0] if default_cpad_paths else None
     sppr_filename = Path(sppr_path).name if sppr_path else None
     # Recommendation block — explains the decision, error location, and next step.
-    analyzer.print_batch_recommendation(
-        [{
-            'cper_data': newest_data,
-            'sppr_created': sppr_path is not None,
-            'sppr_filename': sppr_filename,
-            'dram_row_failure_detected': dram_row_failure_detected,
-            'memory_location': memory_location,
-        }],
-        successful=1,
-        created_sppr_files=default_cpad_filenames,
-        vendor_cpad_files=shim_cpad_filenames,
-        cpad_generation_failed=generation_failed,
-        indent=IND,
-    )
+    if action_only:
+        analyzer.print_batch_recommendation(
+            [{
+                'cper_data': newest_data,
+                'sppr_created': False,
+                'sppr_filename': None,
+                'dram_row_failure_detected': False,
+                'memory_location': None,
+            }],
+            successful=1,
+            vendor_cpad_files=shim_cpad_filenames,
+            cpad_generation_failed=generation_failed,
+            indent=IND,
+        )
+    elif vendor_owned:
+        if shim_result["failed_manufacturers"]:
+            print(
+                f"\n{IND}   ❌ Memory-vendor analysis failed; "
+                "no automatic remediation was proposed.")
+        else:
+            print(
+                f"\n{IND}   💡 Recommendation owned by the "
+                "memory-vendor analyzer (see above).")
+            for filename in shim_cpad_filenames:
+                print(f"{IND}      - {filename}")
+    else:
+        analyzer.print_batch_recommendation(
+            [{
+                'cper_data': newest_data,
+                'sppr_created': sppr_path is not None,
+                'sppr_filename': sppr_filename,
+                'dram_row_failure_detected': dram_row_failure_detected,
+                'memory_location': memory_location,
+            }],
+            successful=1,
+            created_sppr_files=default_cpad_filenames,
+            vendor_cpad_files=shim_cpad_filenames,
+            cpad_generation_failed=generation_failed,
+            indent=IND,
+        )
 
     result = {
         "analyzer_name": ANALYZER_NAME,
