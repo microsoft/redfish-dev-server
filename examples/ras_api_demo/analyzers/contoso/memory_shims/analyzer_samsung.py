@@ -378,7 +378,7 @@ def _print_action(label: str, section: Dict[str, Any]) -> None:
         print(f"            {key}: {_format_value(key, value)}")
 
 
-def _print_result(fault: Any, advisories: List[Dict[str, Any]],
+def _print_result(fault: Any, advisories: List[Any],
                   proposals: List[Dict[str, Any]]) -> None:
     print("\n   🔬 Samsung DRAM Fault Analyzer")
     if fault is None:
@@ -402,7 +402,9 @@ def _print_result(fault: Any, advisories: List[Dict[str, Any]],
     else:
         print("      🗓️  Advisory (boot-time):    none")
     for advisory in advisories:
-        print(f"      ℹ️  {advisory.get('reason', advisory)}")
+        detail = advisory.get("reason", advisory) if isinstance(
+            advisory, dict) else advisory
+        print(f"      ℹ️  {detail}")
 
 
 def analyze_memory_events(events):

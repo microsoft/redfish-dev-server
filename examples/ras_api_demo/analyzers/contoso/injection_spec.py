@@ -369,6 +369,11 @@ def _configured_memory_target(spec, endpoint_configuration):
     section = resolved["section"]
     subcomponent = section["subcomponent"]
     additional = section["additional"]
+    socket = as_int(section.get("socket", 0))
+    if socket != endpoint.memory.socket:
+        raise ValueError(
+            f"section.socket {socket} does not match endpoint memory socket "
+            f"{endpoint.memory.socket}")
     dimm = endpoint.memory.get_dimm(
         as_int(subcomponent.get("chiplet", 0)),
         as_int(subcomponent.get("controller", 0)),
@@ -619,10 +624,10 @@ def validate_spec(spec, endpoint_configuration=None):
 
 # ── Resolve to encoder inputs ───────────────────────────────────────────────
 
-def to_encoder_fields(spec):
+def to_encoder_fields(spec, endpoint_configuration=None):
     """Resolve a validated spec into the low-level ``fields`` dict the encoder
     needs, plus the resolved errorID/severity."""
-    synchronize_memory_address(spec)
+    synchronize_memory_address(spec, endpoint_configuration)
     error = spec["error"]
     section = spec["section"]
 

@@ -839,9 +839,13 @@ class AnalysisOrchestrator:
         entries = []
         for raw_path in dict.fromkeys(cper_paths):
             path = Path(raw_path).resolve()
-            data = decoder.extract_cper_data(str(path)) if path.exists() else None
+            exists = path.exists()
+            data = decoder.extract_cper_data(str(path)) if exists else None
             header = data.get("header", {}) if data else {}
-            timestamp = self._cper_timestamp(path, header)
+            timestamp = (
+                self._cper_timestamp(path, header)
+                if exists else datetime.min
+            )
             is_action = any(
                 isinstance(section, dict)
                 and "PlatformActionEvent" in section

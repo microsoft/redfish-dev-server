@@ -986,6 +986,39 @@ def test_simplified_demo_injection_spec_without_temperature_uses_configured_defa
     assert decoded["additional"]["spd_temperature"] == 40
 
 
+def test_endpoint_encoding_uses_configured_memory_topology():
+    with CONFIG_PATH.open(encoding="utf-8") as stream:
+        config_data = json.load(stream)
+    memory = config_data["ras_endpoints"][0]["memory"]
+    memory["channels_per_chiplet"] = 4
+    memory["memory_controllers"][0]["dimms"][0]["channel"] = 3
+    endpoint_configuration = RASEndpointConfiguration.from_dict(config_data)
+
+    with DEMO_INJECTION_SPEC_PATH.open(encoding="utf-8") as stream:
+        spec = json.load(stream)
+    spec["section"]["additional"]["channel"] = 3
+    spec["section"]["additional"]["dimm"] = 0
+
+    assert spec_model.validate_spec(spec, endpoint_configuration) == []
+    materialized = spec_model.materialize_endpoint_memory_fields(
+        spec, endpoint_configuration)
+    fields = spec_model.to_encoder_fields(
+        materialized, endpoint_configuration)
+
+    assert fields["additional"]["channel"] == 3
+    assert fields["additional"]["dimm"] == 0
+
+
+def test_injection_socket_must_match_endpoint_inventory():
+    with DEMO_INJECTION_SPEC_PATH.open(encoding="utf-8") as stream:
+        spec = json.load(stream)
+    spec["section"]["socket"] = 1
+    endpoint_configuration = RASEndpointConfiguration.load(CONFIG_PATH)
+
+    assert spec_model.validate_spec(spec, endpoint_configuration) == [
+        "section.socket 1 does not match endpoint memory socket 0"]
+
+
 def test_endpoint_upgrades_v14_memory_body_with_configured_temperature():
     handler = _handler()
     cpad = _memory_cpad()

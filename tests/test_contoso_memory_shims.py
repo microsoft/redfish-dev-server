@@ -1488,6 +1488,35 @@ def test_orchestrator_orders_equal_timestamp_action_before_error():
             "action-new.cper", "action-old.cper", "error.cper"]
 
 
+def test_orchestrator_orders_missing_cpers_last():
+    with tempfile.TemporaryDirectory() as directory:
+        directory = Path(directory)
+        valid = directory / "valid.cper"
+        missing = directory / "missing.cper"
+        valid.write_bytes(b"CPER")
+
+        class Decoder:
+            @staticmethod
+            def extract_cper_data(path):
+                assert path == str(valid.resolve())
+                return {
+                    "header": {
+                        "timestamp": "2026-10-06T03:39:12+00:00",
+                        "recordID": 1,
+                    },
+                    "sections": [],
+                }
+
+        orchestrator = AnalysisOrchestrator.__new__(AnalysisOrchestrator)
+        orchestrator._make_decoder = lambda: Decoder()
+
+        ordered = orchestrator._ordered_cper_paths([
+            str(missing), str(valid)])
+
+        assert [Path(path).name for path in ordered] == [
+            "valid.cper", "missing.cper"]
+
+
 def test_orchestrator_retries_listener_connection():
     orchestrator = AnalysisOrchestrator.__new__(AnalysisOrchestrator)
     orchestrator.listener_host = "localhost"

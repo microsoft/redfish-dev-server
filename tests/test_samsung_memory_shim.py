@@ -18,17 +18,21 @@ RAS_DEMO_DIR = ROOT / "examples" / "ras_api_demo"
 for path in (ROOT, CONTOSO_DIR, SHIM_DIR, RAS_DEMO_DIR):
     sys.path.insert(0, str(path))
 
+_STUBBED_SAMSUNG_DFA = False
 try:
     import samsung_dfa  # noqa: F401,E402
 except ImportError:
     # samsung_dfa.py is distributed separately; stub it so the public
     # adapter tests still run without it.
     import types
+    _STUBBED_SAMSUNG_DFA = True
     sys.modules["samsung_dfa"] = types.ModuleType("samsung_dfa")
     sys.modules["samsung_dfa"].analyze = lambda records: {
         "fault": None, "cpads": [], "advisories": []}
 
 import analyzer_samsung as samsung  # noqa: E402
+if _STUBBED_SAMSUNG_DFA:
+    sys.modules.pop("samsung_dfa", None)
 import contoso_action_parameters as actions  # noqa: E402
 from ras_api_samsung_demo import RASAPISamsungDemo  # noqa: E402
 
@@ -67,6 +71,24 @@ def test_samsung_demo_accepts_callable_dfa():
             "def analyze(records):\n    return records\n")
 
         demo._require_samsung_dfa()
+
+
+def test_synthetic_dfa_stub_is_not_globally_registered():
+    if _STUBBED_SAMSUNG_DFA:
+        assert "samsung_dfa" not in sys.modules
+
+
+def test_samsung_demo_reports_failed_submission():
+    demo = RASAPISamsungDemo.__new__(RASAPISamsungDemo)
+    demo.server_online = True
+    demo._build_dram_row_error_cpad = lambda *_args: Path("error.cpad")
+    demo._submit_binary_cpad = lambda *_args, **_kwargs: False
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        submitted = demo.inject_dram_row_error(
+            row=1, column=2, beat="0:0:0", occurrence_label="test")
+
+    assert submitted is False
 
 
 def _ppr_parameters(event):
@@ -297,6 +319,25 @@ def test_samsung_entry_point_adapts_records_and_returns_requests():
             "fru_text": helpers.FRU_TEXT,
         },
     }]}]
+
+
+def test_samsung_entry_point_prints_string_advisories():
+    event = _samsung_event()
+    original_analyze = samsung.analyze
+    samsung.analyze = lambda _records: {
+        "fault": None,
+        "cpads": [],
+        "advisories": ["Related failures detected on DIMM B1"],
+    }
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            requests = samsung.analyze_memory_events([event])
+    finally:
+        samsung.analyze = original_analyze
+
+    assert requests == []
+    assert "Related failures detected on DIMM B1" in output.getvalue()
 
 
 def test_samsung_rejects_non_boolean_action_urgency():

@@ -190,7 +190,8 @@ def cmd_inject(args):
 
     materialized = spec_model.materialize_endpoint_memory_fields(
         spec, endpoint_configuration)
-    fields = spec_model.to_encoder_fields(materialized)
+    fields = spec_model.to_encoder_fields(
+        materialized, endpoint_configuration)
     body = encoder.pack_section_body(section_name, bank_name, fields)
     cpad_json = builder.build_cpad_json(
         materialized, section_guid, body)

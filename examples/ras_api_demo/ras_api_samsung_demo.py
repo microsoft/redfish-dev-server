@@ -356,11 +356,10 @@ class RASAPISamsungDemo:
         try:
             cpad_path = self._build_dram_row_error_cpad(row, column, beat, ce_count)
             print(f"\n🚀 Submitting Error Injection CPAD (row {row}, column {column}; {beat})...")
-            self._submit_binary_cpad(
+            return self._submit_binary_cpad(
                 cpad_path, verbose_steps=True,
                 source_label=(f"Contoso DRAM error CPAD — corrected error at "
                               f"row {row}, column {column} ({beat})"))
-            return True
         except Exception as e:
             print(f"\n❌ Error: {e}")
             return False
