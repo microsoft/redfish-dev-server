@@ -2,6 +2,7 @@
 """Focused tests for Contoso memory-vendor shim integration."""
 
 import base64
+import builtins
 import copy
 import contextlib
 import importlib.util
@@ -302,16 +303,21 @@ class FakeShim:
         return copy.deepcopy(self.result or [])
 
 
-def test_discovers_three_stub_shims():
+def test_discovers_available_memory_shims():
     shims, errors = discover_memory_shims(CONTOSO_DIR / "memory_shims")
 
-    assert errors == []
-    assert set(shims) == {(0x80, 0x2C), (0x80, 0xCE), (0x80, 0xAD)}
-    samsung_event = decode_memory_events(
-        _records(_memory_cper(SAMSUNG)))[0]
-    assert shims[tuple(SAMSUNG)].analyze([samsung_event]) == []
+    assert {(0x80, 0x2C), (0x80, 0xAD)}.issubset(shims)
     assert shims[tuple(MICRON)].analyze([]) == []
     assert shims[(0x80, 0xAD)].analyze([]) == []
+    if tuple(SAMSUNG) in shims:
+        samsung_event = decode_memory_events(
+            _records(_memory_cper(SAMSUNG)))[0]
+        assert shims[tuple(SAMSUNG)].analyze([samsung_event]) == []
+    else:
+        assert any(
+            "analyzer_samsung.py" in error
+            and "samsung_dfa.py not installed" in error
+            for error in errors)
 
 
 def test_rejects_version_4_shim_contract():
@@ -484,7 +490,7 @@ def test_memory_other_errors_are_contoso_owned_and_skip_vendor_shims():
     assert result["history_summary"]["messages"] == [
         "Evaluated 0 prior CPER candidate(s) for matching "
         "memory-controller errors.",
-        "Selected 0 same-vendor memory record(s).",
+        "Selected 0 same-vendor CPER record(s).",
     ]
     assert result["analysis_route"]["messages"] == [
         "Using the default Contoso memory-controller analyzer.",
@@ -670,7 +676,101 @@ def test_action_only_window_never_enters_default_analysis():
     assert analyzer.default_memory_events(result) == []
 
 
-def test_missing_and_failed_shims_can_create_default_sppr():
+def test_action_only_analysis_notifies_vendor_without_memory_error_rules():
+    analyzer = ContosoAnalyzer()
+    shim = FakeShim()
+    memory = MemoryControllerAnalyzer.__new__(MemoryControllerAnalyzer)
+    memory.host = analyzer
+    memory.shims = {tuple(MICRON): shim}
+    memory.shim_errors = []
+    records = _records(_action_cper(), _memory_cper())
+
+    result = memory.analyze([], records, "action", prior_cper_count=1)
+
+    assert result["action_only"] is True
+    assert result["history_summary"] is None
+    assert result["analysis_route"] is None
+    assert result["findings"] == []
+    assert result["default_events"] == []
+    assert result["default_cpads"] == []
+    assert [event["event_type"] for event in shim.received] == [
+        "platform_action", "memory_error"]
+    assert result["shim_result"]["handled_manufacturers"] == {tuple(MICRON)}
+
+
+def test_vendor_window_includes_all_prior_action_events_and_errors():
+    analyzer = ContosoAnalyzer()
+    shim = FakeShim()
+    memory = MemoryControllerAnalyzer.__new__(MemoryControllerAnalyzer)
+    memory.host = analyzer
+    memory.shims = {tuple(MICRON): shim}
+    memory.shim_errors = []
+    records = _records(
+        _memory_cper(MICRON, record_id=4, column=900),
+        _action_cper(action_id="0x8001", return_code="0x01"),
+        _action_cper(action_id="0x8002", return_code="0x00"),
+        _memory_cper(MICRON, record_id=1, column=567),
+    )
+    grouped = ANALYZER_MODULE.decode_newest_sections(
+        analyzer, records[0]["cper_data"], records[0]["cper_file"])
+
+    result = memory.analyze(
+        grouped["memory_controller"], records, "history",
+        prior_cper_count=3)
+
+    assert [event["event_type"] for event in shim.received] == [
+        "memory_error", "platform_action", "platform_action", "memory_error"]
+    assert [event["source"]["cper_file"] for event in shim.received] == [
+        "record-0.cper", "record-1.cper", "record-2.cper", "record-3.cper"]
+    assert result["history_summary"]["messages"][1] == (
+        "Selected 3 same-vendor CPER record(s).")
+
+
+def test_multi_vendor_action_sections_fan_out_to_each_vendor():
+    micron_fru = (FRU_ID, FRU_TEXT)
+    samsung_fru = (
+        "00000000-0000-0000-0000-000000000099", "DIMM S1")
+    action = _action_cper(
+        action_id="0x8001", fru_id=micron_fru[0],
+        fru_text=micron_fru[1])
+    samsung_action = _action_cper(
+        action_id="0x8002", fru_id=samsung_fru[0],
+        fru_text=samsung_fru[1])
+    action["sectionDescriptors"].append(
+        samsung_action["sectionDescriptors"][0])
+    action["sections"].append(samsung_action["sections"][0])
+    records = _records(
+        action,
+        _memory_cper(
+            MICRON, record_id=2, fru_id=micron_fru[0],
+            fru_text=micron_fru[1]),
+        _memory_cper(
+            SAMSUNG, record_id=1, fru_id=samsung_fru[0],
+            fru_text=samsung_fru[1]),
+    )
+    analyzer = ContosoAnalyzer()
+    micron = FakeShim()
+    samsung = FakeShim()
+    memory = MemoryControllerAnalyzer.__new__(MemoryControllerAnalyzer)
+    memory.host = analyzer
+    memory.shims = {
+        tuple(MICRON): micron,
+        tuple(SAMSUNG): samsung,
+    }
+    memory.shim_errors = []
+
+    result = memory.analyze([], records, "multi", prior_cper_count=2)
+
+    assert [event["event_type"] for event in micron.received] == [
+        "platform_action", "memory_error"]
+    assert [event["event_type"] for event in samsung.received] == [
+        "platform_action", "memory_error"]
+    assert micron.received[0]["section_index"] == 0
+    assert samsung.received[0]["section_index"] == 1
+    assert result["newest_vendors"] == [list(MICRON), list(SAMSUNG)]
+
+
+def test_missing_shim_creates_default_sppr_but_failed_shim_does_not():
     with tempfile.TemporaryDirectory() as directory:
         analyzer = ContosoAnalyzer(output_dir=directory)
         current_cper = _memory_cper(MICRON)
@@ -699,13 +799,9 @@ def test_missing_and_failed_shims_can_create_default_sppr():
             tuple(MICRON): FakeShim(error="vendor failed")}
         failed_result = analyzer.analyze_memory_event_window(
             _records(current_cper))
-        failed_event = analyzer.default_memory_events(failed_result)[0]
-        failed_path = analyzer.create_sppr_cpad_from_memory_event(
-            failed_event, current_cper, output_stem="failed",
-            record_location=False)
+        assert analyzer.default_memory_events(failed_result) == []
 
         assert Path(missing_path).name == "missing_sppr_cpad.cpad"
-        assert Path(failed_path).name == "failed_sppr_cpad.cpad"
 
 
 def test_invalid_later_action_request_discards_entire_shim_result():
@@ -1271,6 +1367,125 @@ def test_orchestrator_sends_binary_cpad_to_policy_and_honors_denial():
         assert len(rejections) == 1
         assert rejections[0][0] == binary
         assert isinstance(rejections[0][1], DeniedDecision)
+
+
+def test_orchestrator_pauses_after_policy_before_endpoint_submission():
+    with tempfile.TemporaryDirectory() as directory:
+        binary = Path(directory) / "action.cpad"
+        binary.write_bytes(b"CPAD")
+        order = []
+
+        class AllowedDecision:
+            reason = None
+            action_id = action_parameters.PPR_ACTION_ID
+            fru_text = "DIMM A1"
+
+            def __bool__(self):
+                return True
+
+        class Policy:
+            @staticmethod
+            def evaluate_cpad(path):
+                assert path == str(binary)
+                order.append("policy")
+                return AllowedDecision()
+
+        class Submitter:
+            @staticmethod
+            def submit(path, **_kwargs):
+                assert path == str(binary)
+                order.append("submit")
+
+        orchestrator = AnalysisOrchestrator.__new__(AnalysisOrchestrator)
+        orchestrator.policy_engine = Policy()
+        orchestrator.submitter = Submitter()
+        original_input = builtins.input
+        prompts = []
+
+        def confirm(prompt):
+            prompts.append(prompt)
+            order.append("confirm")
+            return ""
+
+        builtins.input = confirm
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                orchestrator._policy_and_submit(cpad_binary=binary)
+        finally:
+            builtins.input = original_input
+
+        assert order == ["policy", "confirm", "submit"]
+        assert prompts == [
+            "\n🔑 Policy check complete. Press Enter to submit the approved "
+            "CPAD..."
+        ]
+
+
+def test_orchestrator_waits_two_seconds_before_draining_cper_batch():
+    orchestrator = AnalysisOrchestrator.__new__(AnalysisOrchestrator)
+    orchestrator._pending_lock = orchestrator_module.threading.Lock()
+    orchestrator._pending_cpers = ["first.cper"]
+    delivered = []
+    orchestrator.notify_new_cpers = lambda paths: delivered.extend(paths)
+    original_sleep = orchestrator_module.time.sleep
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        with orchestrator._pending_lock:
+            orchestrator._pending_cpers.append("second.cper")
+
+    orchestrator_module.time.sleep = sleep
+    try:
+        orchestrator.process_new_cpers()
+    finally:
+        orchestrator_module.time.sleep = original_sleep
+
+    assert sleeps == [2.0]
+    assert delivered == ["first.cper", "second.cper"]
+
+
+def test_orchestrator_orders_equal_timestamp_action_before_error():
+    with tempfile.TemporaryDirectory() as directory:
+        directory = Path(directory)
+        paths = {
+            name: directory / name
+            for name in ("error.cper", "action-old.cper", "action-new.cper")
+        }
+        for path in paths.values():
+            path.write_bytes(b"CPER")
+        timestamp = "2026-10-06T03:39:12+00:00"
+        decoded = {
+            str(paths["error.cper"].resolve()): {
+                "header": {"timestamp": timestamp, "recordID": 9},
+                "sections": [{"Unknown": {}}],
+            },
+            str(paths["action-old.cper"].resolve()): {
+                "header": {"timestamp": timestamp, "recordID": 10},
+                "sections": [{"PlatformActionEvent": {}}],
+            },
+            str(paths["action-new.cper"].resolve()): {
+                "header": {"timestamp": timestamp, "recordID": 11},
+                "sections": [{"PlatformActionEvent": {}}],
+            },
+        }
+
+        class Decoder:
+            @staticmethod
+            def extract_cper_data(path):
+                return decoded[path]
+
+        orchestrator = AnalysisOrchestrator.__new__(AnalysisOrchestrator)
+        orchestrator._make_decoder = lambda: Decoder()
+
+        ordered = orchestrator._ordered_cper_paths([
+            str(paths["error.cper"]),
+            str(paths["action-old.cper"]),
+            str(paths["action-new.cper"]),
+        ])
+
+        assert [Path(path).name for path in ordered] == [
+            "action-new.cper", "action-old.cper", "error.cper"]
 
 
 def test_orchestrator_retries_listener_connection():

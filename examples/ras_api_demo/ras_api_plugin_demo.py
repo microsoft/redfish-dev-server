@@ -80,6 +80,9 @@ class RASAPIPluginDemo:
         # demonstrating the standard "vendor tool produces vendor CPADs" pattern.
         self.injector = self.script_dir / "analyzers" / "contoso" / "injector-contoso.py"
         self.injection_spec = self.cpad_storage_dir / "contosoMemErrorSpoof.inject.json"
+        self.endpoint_config = (
+            self.script_dir.parents[1]
+            / "mockups" / "ras_gen1" / "ras_endpoint_config.json")
         self.generated_cpad_dir = self.output_dir / "injected_cpads"
         self.generated_cpad_dir.mkdir(parents=True, exist_ok=True)
 
@@ -102,14 +105,14 @@ class RASAPIPluginDemo:
             submitter=self.submitter,
         )
 
-    def _wait_and_analyze(self):
+    def _wait_and_analyze(self, prompt=None):
         """Wait for the listener to deliver CPER(s), then route them.
 
         The event listener downloads CPERs and notifies the orchestrator, which
         buffers them.  Here we wait for at least one, then ask the orchestrator
         to route everything it has received (analyze → policy → submit).
         """
-        input("\n🔑 Press Enter to wait for the listener and analyze...")
+        input(prompt or "\n🔑 Press Enter to wait for the listener and analyze...")
         if not self.analysis.wait_for_cpers(count=1, timeout=30.0):
             print("\n   ⚠️  No CPER notification within the timeout — "
                   "analyzing whatever has arrived.")
@@ -226,12 +229,14 @@ class RASAPIPluginDemo:
         cmd = [
             sys.executable, str(self.injector), "inject",
             "--spec", str(self.injection_spec),
+            "--endpoint-config", str(self.endpoint_config),
             "--set", f"section.additional.column={column}",
             "--beat", beat,
             "--out", str(out_path),
         ]
         print(f"\n   Running the Contoso Error Injector (vendor tool):")
         print(f"      injector-contoso.py inject --spec {self.injection_spec.name} "
+              f"--endpoint-config {self.endpoint_config.name} "
               f"--set section.additional.column={column} --beat \"{beat}\" "
               f"--out {out_path.name}")
         result = subprocess.run(cmd, capture_output=True, text=True)

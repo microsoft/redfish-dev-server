@@ -177,21 +177,25 @@ dispatch and reporting contract without inventing a mitigation policy.
 ### Memory Error Analysis
 
 For a newest error CPER containing DRAM-error sections, all such sections must
-identify one DRAM manufacturer. Multiple DRAM manufacturers in that newest CPER
-are rejected as ambiguous. Memory history is built only from successfully
-decoded memory-controller DRAM-error sections that:
+identify one DRAM manufacturer. Multiple DRAM manufacturers in one newest
+memory-error CPER are rejected as ambiguous. For each stateless invocation, the
+memory input window is rebuilt from successfully decoded CPERs that:
 
-- have the same DRAM manufacturer as the newest DRAM sections; and
+- contain a DRAM error or correlated Platform Action Event for a selected DRAM
+  manufacturer; and
 - match the newest CPER's CreatorID, PlatformID, and PartitionID.
 
 Historical CPU, IO, unsupported, and memory sections from another DRAM vendor
-are ignored. Each retained event carries its source CPER and original section
-index. A memory-controller `Other Errors` bank remains Contoso-owned: it is
+are ignored. All relevant prior Platform Action Events are retained, not only
+the newest action result. Each retained event carries its source CPER and
+original section index. A memory-controller `Other Errors` bank remains Contoso-owned: it is
 reported as a structured finding and is never sent to a DRAM-vendor shim.
 
 The memory analyzer supports optional tools supplied by memory vendors. Contoso
 ships Python shims under `memory_shims/` that adapt the common event contract to
-those vendor tools. The initial shims are stubs:
+those vendor tools. The Micron shim delegates to a separately distributed MERC
+executable, the SK hynix shim is a stub, and the Samsung shim delegates to the
+separately distributed `samsung_dfa.py`:
 
 - `analyzer_micron.py`
 - `analyzer_samsung.py`
@@ -235,6 +239,11 @@ are normalized to lowercase without braces. If matching errors identify exactly
 one DRAM manufacturer, the action is routed to that vendor's shim using the most
 recent match as its memory target. Missing matches or conflicting manufacturers
 are reported as uncorrelated and are not routed.
+
+One Platform Action Event CPER may contain sections for multiple memory
+vendors. Sections are correlated independently and fanned out to each matching
+shim. Each shim sees only its sections, all relevant prior action results, and
+same-vendor memory errors.
 
 #### Memory shim output
 
@@ -293,9 +302,11 @@ descriptors before deciding whether the same binary may be submitted.
 
 A valid empty action-request list means the vendor shim successfully analyzed
 the events and recommends no action. The default failing-row detector does not
-run in that case. If no matching shim exists, or shim discovery, invocation,
-validation, or binary conversion fails, a newest memory error falls back to the
-detector below. Platform Action Events never invoke the default detector.
+run in that case. If no matching shim is loaded (none exists, or it failed
+discovery/import), a newest memory error falls back to the detector below. If a
+loaded shim fails invocation, validation, or binary conversion, the failure is
+reported and no default recommendation is substituted. Platform Action Events
+never invoke the default detector.
 
 The grouped multi-section version 5 shim contract is documented in
 [Memory Vendor Analyzer Shim Interface](memory_shims/memory-vendor-analyzer-shim.md).
@@ -316,8 +327,23 @@ See [Contoso Demo Memory Address Translation](contoso-memory-address-translation
 
 #### Micron Analyzer Interface
 
-The stub registers DDR5 SPD manufacturer ID `80 2C` and returns no action
+The Micron adapter registers DDR5 SPD manufacturer ID `80 2C`. When
+`MICRON_MERC_INPUT_FILE` selects a retry-read CSV, the adapter filters its rows
+to the newest CPER's SPD serial and part number, invokes the locally installed
+MERC 3.1.1 tool, and converts its classifications into grouped Contoso action
 requests.
+Without that environment variable, it remains inactive so the normal demo is
+unchanged.
+
+`block_of_rows` maps MERC's DIMM-relative offline range bounds to 4 KiB Page
+Offline ranges, and otherwise falls back to Replace Part with an explicit
+diagnostic;
+`high_severity` maps to Replace Part;
+`dram_transient` to Power Cycle; `ppr_eligible` to PPR; `system_general` to
+Reboot with Memory Retraining; and `system_socketing` to Reseat Part.
+`correctable`, `low_severity`, and `system_transient` produce no action.
+Platform Action Event-only invocations are acknowledged without rerunning MERC
+or generating a follow-up CPAD.
 
 #### Samsung Analyzer Interface
 

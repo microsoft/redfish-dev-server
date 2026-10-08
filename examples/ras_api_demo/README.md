@@ -68,6 +68,48 @@ source RasApiEnv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Micron MERC demo
+
+The Micron launcher accepts a MERC retry-read CSV and stages a temporary copy
+of the RAS Gen 1 mockup. Each unique `msn`/`mpn` pair is assigned to one of the
+DIMM slots in
+[`ras_endpoint_config_micron.json`](../../mockups/ras_gen1/ras_endpoint_config_micron.json).
+The committed endpoint template uses Micron DDR5 manufacturer ID `80 2C`; the
+original mockup remains unchanged. Inputs with more than eight unique modules
+automatically stage a second socket endpoint.
+
+MERC is distributed separately and is not stored in Git. Install the executable
+at:
+
+```text
+examples/ras_api_demo/analyzers/contoso/memory_shims/vendor_tools/micron/merc3_1_1/merc3
+```
+
+Product CSVs are also local-only and may be stored under the ignored
+`vendor_tools/micron/micron_inputs/` directory.
+
+```bash
+./examples/ras_api_demo/run_ras_demo_micron.sh /path/to/retry-read-errors.csv
+```
+
+The CSV must contain `msn`, `mpn`, `rr_log`, `rr_addr1`, `rr_addr2`,
+`rr_parity`, and `intel_hw_gen`. The demo supports at most sixteen unique DIMMs.
+For each represented DIMM, it injects a Micron memory CPER, runs MERC against
+that DIMM's input rows, and maps the result through policy:
+
+| MERC class | RAS result |
+|---|---|
+| `block_of_rows` | Page Offline; Replace Part if MERC supplies no ranges |
+| `high_severity` | Replace Part |
+| `dram_transient` | Power Cycle |
+| `ppr_eligible` | Post Package Repair |
+| `system_general` | Reboot with Memory Retraining |
+| `system_socketing` | Reseat Part |
+| `correctable`, `low_severity`, `system_transient` | No action |
+
+MERC 3.1.1 rejects the supplied Y4CA product MPNs; the demo reports that vendor
+tool failure explicitly and does not substitute a default Contoso repair.
+
 ### 3. Fetch external dependencies
 
 ```bash
@@ -93,6 +135,21 @@ bash examples/ras_api_demo/setup_dependencies.sh --update
 bash examples/ras_api_demo/run_ras_demo.sh
 ```
 
+### Samsung DIMM demo
+
+The optional Samsung-specific demo uses the same RAS Plugin SDK server and
+analysis pipeline with `ras_endpoint_config_samsung.json`. It requires the
+separately distributed `samsung_dfa.py` beside the Samsung shim and fails
+before startup if that dependency is unavailable.
+
+```bash
+bash examples/ras_api_demo/run_samsung_ras_demo.sh
+```
+
+The launcher passes `--endpoint-config ras_endpoint_config_samsung.json`; the
+server applies that override to the configured RAS extension before the common
+Plugin SDK initializes its single handler instance.
+
 Or run each component manually:
 
 ```bash
@@ -107,6 +164,11 @@ python3 examples/ras_api_demo/reset_server.py --clean-temp && python3 examples/r
 ```
 
 ## Architecture
+
+The following diagram shows the end-to-end CPER analysis and CPAD remediation
+flow. Select the diagram to open the full-size presentation graphic.
+
+[![OCP RAS API demo CPER analysis and CPAD remediation flow](ocp-ras-api-demo-flow.svg)](ocp-ras-api-demo-flow.svg)
 
 - **Pane 1 — BMC Server** (`redfishMockupServer_platform.py`): Simulates a BMC with a RAS LogService
 - **Pane 2 — SDK Listener** (`event_listener_sdk.py`): Subscribes to a host's events on command, auto-downloads CPERs, and notifies the orchestrator over a control socket
